@@ -1,0 +1,258 @@
+#include <Wire.h>
+#include "Adafruit_MCP23017.h"
+#include <EEPROM.h>
+#include "pitches.h"
+
+//*****************************************************************************
+// User settable variables	
+//*****************************************************************************
+unsigned char PadNote[48] = {64,69,62,67,60,65,84,86,71,66,61,68,63,70,85,87,
+                             64,69,62,67,60,65,84,86,71,66,61,68,63,70,85,87, 
+                             76,81,74,79,72,77,84,86,83,78,73,80,75,82,85,87};        // MIDI notes from 0 to 127 (Mid C = 60) for drums
+
+int PadCutOff[48] = {8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+                     8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,
+                     8,8,8,8,8,8,8,8,8,8,8,8,8,8,8,8};           // Minimum Analog value to cause a drum hit, default=600
+
+int MaxPlayTime[48] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};               // Cycles before a 2nd hit is allowed, default=90
+
+#define  midichannel	0;                              // MIDI channel from 0 to 15 (+1 in "real world")
+boolean VelocityFlag  = true;                           // Velocity ON (true) or OFF (false)
+//************************************************************************************
+// Internal Use Variables	
+//************************************************************************************
+// Defines
+
+// MuxShield:
+// Give convenient names to the control pins of the muxshield
+#define CONTROL0 5    
+#define CONTROL1 4
+#define CONTROL2 3
+#define CONTROL3 2
+// Create arrays for data from the the MUXs
+// See the Arduino Array Reference: http://www.arduino.cc/en/Reference/Array
+//int mux0array[16]; //**********
+int mux1array[16];
+int mux2array[16]; //**********
+int analogPin=0;
+int pad=0;
+
+//Adafruit_MCP23017 mcp0; //first MCP23017  //****************
+Adafruit_MCP23017 mcp1; //second MCP23017
+Adafruit_MCP23017 mcp2; //third MCP23017  //****************
+
+int pattern =0; //create an interger
+
+boolean activePad[48] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                         0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                         0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};                   // Array of flags of pad currently playing
+int PinPlayTime[48] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,
+                       0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0};                     // Counter since pad started to play
+unsigned char status;
+int pin =0;     
+int hitavg = 0;
+//midi through
+byte byte1;
+byte byte2;
+byte byte3;
+//  Making analog readings faster (for drumrolls) works with this code
+// read http://www.arduino.cc/cgi-bin/yabb2/YaBB.pl?num=1208715493/11 for more info
+#define FASTADC 1
+// defines for setting and clearing register bits
+#ifndef cbi
+#define cbi(sfr, bit) (_SFR_BYTE(sfr) &= ~_BV(bit))
+#endif
+#ifndef sbi
+#define sbi(sfr, bit) (_SFR_BYTE(sfr) |= _BV(bit))
+#endif
+
+// notes to play, corresponding to the 48+ sensors:
+int notes[48] = {NOTE_E5,  NOTE_A5,  NOTE_D5,  NOTE_G5,  NOTE_C5,  NOTE_F5,  NOTE_C7,  NOTE_D7,
+                 NOTE_B5 , NOTE_FS5,  NOTE_CS5,  NOTE_GS5,  NOTE_DS5,  NOTE_AS5,  NOTE_CS7,  NOTE_DS7,//******************* 
+   NOTE_E5,  NOTE_A5,  NOTE_D5,  NOTE_G5,  NOTE_C5,  NOTE_F5,  NOTE_C7,  NOTE_D7,
+   NOTE_B5 , NOTE_FS5,  NOTE_CS5,  NOTE_GS5,  NOTE_DS5,  NOTE_AS5,  NOTE_CS7,  NOTE_DS7,//*************************
+                 NOTE_E6,  NOTE_A6,  NOTE_D6,  NOTE_G6,  NOTE_C6,  NOTE_F6,  NOTE_C7,  NOTE_D7,
+                 NOTE_B6 , NOTE_FS6,  NOTE_CS6,  NOTE_GS6,  NOTE_DS6,  NOTE_AS6,  NOTE_CS7,  NOTE_DS7 };//***************************
+
+// Start of code
+//*********************************************************************************************
+// Setup	
+//**********************************************************************************************
+void setup() 
+{
+//Set I2C/GPIO Port Expander  
+//Initallize i2C bus
+//	mcp0.begin(0);	//initialize MCP23017 0  //*********
+mcp1.begin(1);	//initialize MCP23017 1
+mcp2.begin(2);	//initialize MCP23017 2   //*********
+// make all pins outputs
+for(int i=0; i<16; i++){
+//	mcp0.pinMode(i, OUTPUT); //****************
+mcp1.pinMode(i, OUTPUT);
+mcp2.pinMode(i, OUTPUT); //****************
+}
+//Set MUX control pins to output
+pinMode(CONTROL0, OUTPUT);
+pinMode(CONTROL1, OUTPUT);
+pinMode(CONTROL2, OUTPUT);
+pinMode(CONTROL3, OUTPUT);
+
+ 
+
+//Serial.begin(9600);                                   // connect to the serial port 9600 (for debug)
+//Serial.begin(57600);                                  // connect to the serial port 57600
+Serial.begin(31250);                                 // connect to the serial port (31250) //midi standard
+//Serial.begin(115200);                                   // connect to the serial port 115200
+#if FASTADC
+  // set prescale to 16
+  sbi(ADCSRA,ADPS2) ;
+  cbi(ADCSRA,ADPS1) ;
+  cbi(ADCSRA,ADPS0) ;
+#endif
+}
+//***********************************************************************************************
+// Main Program	
+//***********************************************************************************************
+void loop(){
+  
+  //loopback all incoming midi events
+  midiLoopback();
+//  readSensors(0); //  *********
+  readSensors(1);
+  readSensors(2); //**********
+//  checkSensors(0); //  *********
+  checkSensors(1);
+  checkSensors(2);//**********
+ 
+}
+
+void readSensors(int analogPin){
+    //This for loop is used to scroll through and store the 16 inputs on the FIRST multiplexer
+  for (int i=0; i<16; i++){
+    digitalWrite(CONTROL0, (i&15)>>3); 
+    digitalWrite(CONTROL1, (i&7)>>2);  
+    digitalWrite(CONTROL2, (i&3)>>1);  
+    digitalWrite(CONTROL3, (i&1));     
+
+    //Read and store the input value at a location in the array
+//    if(analogPin==0){  //  *********
+//    mux0array[i] = analogRead(analogPin);  //************
+//    } //  ***********
+     if(analogPin==1){
+      mux1array[i] = analogRead(analogPin);
+    }
+     if(analogPin==2){ //********
+      mux2array[i] = analogRead(analogPin); //**********
+    } //********
+  }
+}
+
+void checkSensors(int analogPin)
+{
+
+   for(int pin=0; pin <16; pin++)
+   {   
+//      if(analogPin==0) // *********
+//      { //************
+//         hitavg = mux0array[pin]; //********
+//         pad=pin; //************
+//      } //**************
+      if(analogPin==1)
+      {
+         hitavg = mux1array[pin];
+         pad=pin+16;
+      }
+      if(analogPin==2) //************
+      { //*****************
+         hitavg = mux2array[pin];//***********
+         pad=pin+32;//****************
+      } //************
+
+      if((hitavg > PadCutOff[pin]))
+      {
+         //Serial.writeln("hitavg > PadCutOff[pin])");
+         if((activePad[pad] == false))
+         {
+            if(VelocityFlag == true)
+            {
+                 //hitavg = 127 / ((1023 - PadCutOff[pin]) / (hitavg - PadCutOff[pin]));    // With full range (Too sensitive ?)
+                 hitavg = (hitavg / 8) -1 ;                                                 // Upper range
+            }
+            else
+            {
+               hitavg = 127;
+            }
+            
+            MIDI_TX(144,PadNote[pad],hitavg); 
+            PinPlayTime[pad] = 0;
+            activePad[pad] = true;
+            tone(8, notes[pad]);
+         }
+         else
+         {
+            PinPlayTime[pad] = PinPlayTime[pad] + 1;
+         }         
+      }
+      else 
+      {
+         if((activePad[pad] == true))
+         {
+            PinPlayTime[pad] = PinPlayTime[pad] + 1;
+
+            if(PinPlayTime[pad] > MaxPlayTime[pad])
+            {
+               activePad[pad] = false;
+               MIDI_TX(128,PadNote[pad],127);
+              noTone(8); 
+            }
+         }
+      }
+            
+//      if(analogPin==0) //******************
+//      { //********************
+//         if (activePad[pad]) //*******************
+//            mcp0.digitalWrite(pad, HIGH); //*************
+//         else //****************
+//            mcp0.digitalWrite(pad, LOW);  //******************
+//      }  //************************
+  if(analogPin==1)
+      {
+         if (activePad[pad])
+            mcp1.digitalWrite(pad-16, HIGH);
+         else
+            mcp1.digitalWrite(pad-16, LOW);
+      }
+      if(analogPin==2) //***********
+      { //****************
+         if (activePad[pad]) //************
+            mcp2.digitalWrite(pad-32, HIGH);//*************
+         else //*************
+            mcp2.digitalWrite(pad-32, LOW);//***********************
+      }//********************
+   }
+}
+
+//*****************************************************************************************
+// Transmit MIDI Message	
+//*****************************************************************************************
+void MIDI_TX(unsigned char MESSAGE, unsigned char PITCH, unsigned char VELOCITY) 
+{
+  status = MESSAGE + midichannel;
+  Serial.write(status);
+  Serial.write(PITCH);
+  Serial.write(VELOCITY);
+}
+
+ //************* MIDI LOOPBACK ****************//
+void midiLoopback(){
+  if(Serial.available() > 0){
+      byte1 = Serial.read();
+      byte2 = Serial.read();
+      byte3 = Serial.read();
+      
+      MIDI_TX(byte1, byte2, byte3);
+    }
+  }
